@@ -661,6 +661,211 @@ def train_edge_model(args):
     return output_dir
 
 
+def train_lines_model(args):
+    """Train GeoCNN-Lines model with line feature fusion."""
+    device = get_device()
+    print(f"Using device: {device}")
+    
+    # Create output directory
+    output_dir = create_output_dir(args.output_dir, 'geocnn_lines')
+    
+    # Load data
+    image_paths, labels, class_names = load_dataset_from_directory(args.data_dir)
+    (train_paths, train_labels), (val_paths, val_labels), (test_paths, test_labels) = create_splits(
+        image_paths, labels
+    )
+    
+    # Create datasets with line feature extraction
+    from data.augmentations import LineFeatureAugmentation
+    from data.transforms import get_train_transforms, get_val_transforms
+    
+    class LinesDataset(GeoDataset):
+        """Dataset that extracts line features alongside images."""
+        def __init__(self, image_paths, labels, class_names, transform=None, return_path=True):
+            super().__init__(image_paths, labels, class_names, transform=transform, return_path=return_path)
+            self.line_extractor = LineFeatureAugmentation()
+        
+        def __getitem__(self, idx):
+            # Get image and label
+            image, label = super().__getitem__(idx)
+            
+            # Extract line features from original image
+            img_path = self.image_paths[idx]
+            import cv2
+            img = cv2.imread(img_path)
+            if img is not None:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                line_features = self.line_extractor(img)
+            else:
+                line_features = np.zeros(20, dtype=np.float32)
+            
+            line_features = torch.tensor(line_features, dtype=torch.float32)
+            
+            if self.return_path:
+                return image, label, line_features, img_path
+            return image, label, line_features
+    
+    # Create transforms
+    train_transform = get_train_transforms(input_size=args.input_size, use_horizontal_flip=args.use_flip)
+    val_transform = get_val_transforms(input_size=args.input_size)
+    
+    train_dataset = LinesDataset(train_paths, train_labels, class_names, transform=train_transform, return_path=True)
+    val_dataset = LinesDataset(val_paths, val_labels, class_names, transform=val_transform, return_path=True)
+    
+    # Get class weights
+    class_weights = train_dataset.get_class_weights()
+    
+    # Custom collate function for line features
+    def collate_fn(batch):
+        images = torch.stack([item[0] for item in batch])
+        labels = torch.tensor([item[1] for item in batch])
+        line_features = torch.stack([item[2] for item in batch])
+        paths = [item[3] for item in batch]
+        return images, labels, line_features, paths
+    
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=True
+    )
+    
+    # Create model
+    num_classes = len(class_names)
+    model = GeoCNNLines(num_classes=num_classes, dropout_p=args.dropout)
+    model = model.to(device)
+    print(f"Model parameters: {model.count_parameters():,}")
+    
+    # Create criterion
+    criterion = LabelSmoothingCrossEntropy(
+        smoothing=args.label_smoothing,
+        weight=class_weights.to(device) if args.use_class_weights else None
+    )
+    
+    # Create optimizer and scheduler
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
+    
+    # Build config
+    config = vars(args).copy()
+    config['num_classes'] = num_classes
+    config['model_params'] = model.count_parameters()
+    config['experiment_name'] = 'GeoCNN-Lines'
+    
+    # Create custom trainer for lines model
+    class LinesTrainerWrapper(Trainer):
+        """Wrapper to handle line features in training loop."""
+        def train_epoch(self):
+            self.model.train()
+            total_loss = 0.0
+            correct_top1 = 0
+            correct_top5 = 0
+            total = 0
+            
+            pbar = tqdm(self.train_loader, desc='Training')
+            for images, labels, line_features, _ in pbar:
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+                line_features = line_features.to(self.device)
+                
+                self.optimizer.zero_grad()
+                outputs = self.model(images, line_features)
+                loss = self.criterion(outputs, labels)
+                loss.backward()
+                self.optimizer.step()
+                
+                total_loss += loss.item() * images.size(0)
+                total += labels.size(0)
+                
+                _, pred_top1 = outputs.max(1)
+                correct_top1 += pred_top1.eq(labels).sum().item()
+                
+                _, pred_top5 = outputs.topk(min(5, outputs.size(1)), 1, True, True)
+                correct_top5 += pred_top5.eq(labels.view(-1, 1).expand_as(pred_top5)).any(1).sum().item()
+                
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'top1': f'{100.*correct_top1/total:.2f}%',
+                    'top5': f'{100.*correct_top5/total:.2f}%'
+                })
+            
+            return total_loss / total, correct_top1 / total, correct_top5 / total
+        
+        @torch.no_grad()
+        def validate(self, compute_per_class=False):
+            self.model.eval()
+            total_loss = 0.0
+            correct_top1 = 0
+            correct_top5 = 0
+            total = 0
+            all_preds = []
+            all_labels = []
+            
+            for images, labels, line_features, _ in tqdm(self.val_loader, desc='Validation'):
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+                line_features = line_features.to(self.device)
+                
+                outputs = self.model(images, line_features)
+                loss = self.criterion(outputs, labels)
+                
+                total_loss += loss.item() * images.size(0)
+                total += labels.size(0)
+                
+                _, pred_top1 = outputs.max(1)
+                correct_top1 += pred_top1.eq(labels).sum().item()
+                
+                _, pred_top5 = outputs.topk(min(5, outputs.size(1)), 1, True, True)
+                correct_top5 += pred_top5.eq(labels.view(-1, 1).expand_as(pred_top5)).any(1).sum().item()
+                
+                all_preds.extend(pred_top1.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+            
+            macro_f1 = f1_score(all_labels, all_preds, average='macro')
+            
+            per_class_metrics = None
+            if compute_per_class:
+                report = classification_report(all_labels, all_preds, 
+                                              target_names=self.class_names, 
+                                              output_dict=True, zero_division=0)
+                per_class_metrics = {
+                    name: {
+                        'precision': report[name]['precision'],
+                        'recall': report[name]['recall'],
+                        'f1': report[name]['f1-score'],
+                        'support': report[name]['support']
+                    }
+                    for name in self.class_names if name in report
+                }
+                cm = confusion_matrix(all_labels, all_preds)
+                self.tracker.log_confusion_matrix(cm)
+                recall_dict = {name: metrics['recall'] for name, metrics in per_class_metrics.items()}
+                self.tracker.log_per_class_recall(recall_dict)
+            
+            return (total_loss / total, correct_top1 / total, correct_top5 / total, 
+                    macro_f1, per_class_metrics)
+    
+    trainer = LinesTrainerWrapper(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=device,
+        output_dir=output_dir,
+        class_names=class_names,
+        config=config,
+        use_amp=args.use_amp
+    )
+    
+    trainer.train(epochs=args.epochs, patience=args.patience)
+    
+    return output_dir
+
+
 def main():
     parser = argparse.ArgumentParser(description='Train GeoGuessr classification models')
     
@@ -730,9 +935,7 @@ def main():
     elif args.model == 'edge':
         train_edge_model(args)
     elif args.model == 'lines':
-        print("Lines model training - use train_lines.py for better performance")
-        # Simplified: use base trainer (would need custom data loader for full implementation)
-        train_base_model(args)
+        train_lines_model(args)
     elif args.model == 'segmentation':
         print("Segmentation model training - use train_segmentation.py for better performance")
         train_base_model(args)
