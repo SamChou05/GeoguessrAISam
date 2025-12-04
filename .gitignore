@@ -1,0 +1,43 @@
+# Dataset (too large for git)
+compressed_dataset/
+dataset/
+
+# Model outputs and checkpoints
+outputs/
+experiments/
+*.pth
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+tensorboard/
+logs/
+
+# Large files
+*.zip
+*.tar.gz
+*.rar
+
