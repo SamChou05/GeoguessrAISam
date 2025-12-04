@@ -685,7 +685,7 @@ def main():
                        help='Edge type for edge model')
     
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=80,
+    parser.add_argument('--epochs', type=int, default=20,
                        help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=64,
                        help='Batch size')
