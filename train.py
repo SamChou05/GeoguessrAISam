@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 # Fix multiprocessing on macOS
 if platform.system() == 'Darwin':
@@ -137,7 +137,11 @@ class Trainer:
         self.class_names = class_names
         self.use_amp = use_amp
         
-        self.scaler = GradScaler() if use_amp else None
+        # Initialize scaler for mixed precision (works with CUDA)
+        if use_amp and device.type == 'cuda':
+            self.scaler = GradScaler('cuda')
+        else:
+            self.scaler = None
         
         # Initialize comprehensive tracker
         self.tracker = TrainingTracker(
@@ -166,7 +170,7 @@ class Trainer:
             self.optimizer.zero_grad()
             
             if self.use_amp and self.device.type == 'cuda':
-                with autocast():
+                with autocast('cuda'):
                     outputs = self.model(images)
                     loss = self.criterion(outputs, labels)
                 

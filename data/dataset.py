@@ -58,15 +58,23 @@ class GeoDataset(Dataset):
         return len(self.image_paths)
     
     def __getitem__(self, idx: int) -> Tuple:
-        # Load image
+        """Load image with error handling for corrupted files."""
         img_path = self.image_paths[idx]
-        image = Image.open(img_path).convert('RGB')
+        label = self.labels[idx]
+        
+        try:
+            image = Image.open(img_path).convert('RGB')
+            # Verify image is valid
+            image.load()
+        except (OSError, IOError, Image.UnidentifiedImageError) as e:
+            # If image is corrupted, return a black image as fallback
+            # This should rarely happen if validate_images=True during loading
+            print(f"Warning: Could not load {img_path}, using black image. Error: {e}")
+            image = Image.new('RGB', (224, 224), color='black')
         
         # Apply transform
         if self.transform:
             image = self.transform(image)
-        
-        label = self.labels[idx]
         
         if self.return_path:
             return image, label, img_path
@@ -96,10 +104,21 @@ class GeoDataset(Dataset):
         return torch.FloatTensor(weights)
 
 
+def is_valid_image(image_path: str) -> bool:
+    """Check if an image file is valid and can be opened."""
+    try:
+        with Image.open(image_path) as img:
+            img.verify()  # Verify it's a valid image
+        return True
+    except (OSError, IOError, Image.UnidentifiedImageError):
+        return False
+
+
 def load_dataset_from_directory(
     root_dir: str,
     extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png', '.webp'),
-    min_samples_per_class: int = 10
+    min_samples_per_class: int = 10,
+    validate_images: bool = True
 ) -> Tuple[List[str], List[int], List[str]]:
     """
     Load image paths and labels from directory structure.
@@ -143,17 +162,35 @@ def load_dataset_from_directory(
     
     image_paths = []
     labels = []
+    corrupted_count = 0
     
+    print("Loading and validating images...")
     for class_name in class_names:
         class_dir = os.path.join(root_dir, class_name)
         class_idx = class_to_idx[class_name]
         
         for filename in os.listdir(class_dir):
             if filename.lower().endswith(extensions):
-                image_paths.append(os.path.join(class_dir, filename))
-                labels.append(class_idx)
+                img_path = os.path.join(class_dir, filename)
+                
+                # Validate image if requested
+                if validate_images:
+                    if is_valid_image(img_path):
+                        image_paths.append(img_path)
+                        labels.append(class_idx)
+                    else:
+                        corrupted_count += 1
+                        if corrupted_count <= 5:  # Print first 5 corrupted files
+                            print(f"  Skipping corrupted image: {img_path}")
+                else:
+                    # Skip validation (faster but may crash during training)
+                    image_paths.append(img_path)
+                    labels.append(class_idx)
     
-    print(f"Loaded {len(image_paths)} images from {len(class_names)} classes")
+    if validate_images and corrupted_count > 0:
+        print(f"  Skipped {corrupted_count} corrupted images")
+    
+    print(f"Loaded {len(image_paths)} valid images from {len(class_names)} classes")
     return image_paths, labels, class_names
 
 
