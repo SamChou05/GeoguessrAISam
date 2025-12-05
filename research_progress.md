@@ -1,8 +1,8 @@
 # Research Progress: GeoGuessr Country Classification
 
 **Date:** December 4, 2025  
-**Experiment:** GeoCNN-Base  
-**Status:** Initial Training Complete
+**Experiments:** GeoCNN-Base, GeoCNN-Edge (Sobel & Canny)  
+**Status:** Base Model Complete, Edge Experiments Complete, Lines Experiment Pending
 
 ---
 
@@ -87,6 +87,79 @@ The **Macro F1 score of 0.1218** is relatively low, which indicates:
 The cosine annealing schedule worked as expected:
 - Started at 3e-4, decayed to 3e-6 by epoch 20
 - Smooth decay allowed fine-tuning in later epochs
+
+---
+
+## 2.5 Side Experiment A: Edge-Augmented CNN Results
+
+### 2.5.1 Experiment Overview
+
+**Side Experiment A** tested whether adding edge information as additional input channels improves country classification. Two variants were tested:
+- **A1: Sobel Edges** - RGB + cos(θ) + sin(θ) = 5 channels
+- **A2: Canny Edges** - RGB + edge map = 4 channels
+
+**Computer Vision Techniques:**
+- Sobel operator for gradient computation (derivatives)
+- Canny edge detection
+- Course topics: Filters, Derivatives, Edges
+
+### 2.5.2 Results Comparison
+
+| Model | Top-1 Acc | Top-5 Acc | Macro F1 | Improvement vs Base |
+|-------|-----------|-----------|----------|---------------------|
+| **GeoCNN-Base** | 43.06% | 74.09% | 0.1218 | Baseline |
+| **GeoCNN-Edge (Sobel)** | **47.61%** | **78.04%** | 0.1100 | **+4.55 pp** |
+| **GeoCNN-Edge (Canny)** | **47.74%** | **77.67%** | 0.1129 | **+4.68 pp** |
+
+### 2.5.3 Key Findings
+
+**✅ Significant Improvement in Top-1 Accuracy:**
+- **Sobel:** +4.55 percentage points (43.06% → 47.61%)
+- **Canny:** +4.68 percentage points (43.06% → 47.74%)
+- Both edge variants performed similarly, with Canny slightly better
+- **This confirms our hypothesis** that edge channels help identify country-specific features
+
+**✅ Top-5 Accuracy Also Improved:**
+- Sobel: 74.09% → 78.04% (+3.95 pp)
+- Canny: 74.09% → 77.67% (+3.58 pp)
+- Model is better at narrowing down to correct region
+
+**⚠️ Macro F1 Slightly Lower:**
+- Sobel: 0.1218 → 0.1100 (-0.0118)
+- Canny: 0.1218 → 0.1129 (-0.0089)
+- Suggests edge channels help common classes more than rare ones
+- May need different weighting strategy for edge-augmented models
+
+### 2.5.4 Training Dynamics
+
+**Sobel Model:**
+- Best epoch: 17 (same as base model)
+- Training time: 2.00 hours (faster than base: 4.28 hours)
+- Final train loss: 1.6457, val loss: 1.6678
+- Consistent improvement throughout training
+
+**Canny Model:**
+- Best epoch: 18
+- Training time: 1.96 hours
+- Final train loss: 1.6524, val loss: 1.6747
+- Similar training dynamics to Sobel
+
+**Observation:** Edge models trained faster (2 hours vs 4.28 hours) despite additional preprocessing, likely due to better convergence.
+
+### 2.5.5 Why Edge Channels Help
+
+1. **Road Markings:** Different countries have distinct lane markings, road signs, and traffic patterns
+2. **Architecture:** Building edges and skyline geometry vary by region
+3. **Infrastructure:** Power lines, fences, and other linear structures are country-specific
+4. **Derivative Information:** Edge channels explicitly encode gradient information that the CNN can leverage
+
+### 2.5.6 Comparison: Sobel vs Canny
+
+- **Canny slightly outperforms Sobel** (47.74% vs 47.61%), but difference is minimal
+- Both provide similar improvements over baseline
+- **Sobel advantages:** Preserves orientation information (cos/sin), more information-rich
+- **Canny advantages:** Binary edge map is simpler, may be more robust to noise
+- **Recommendation:** Either approach works well; Canny is slightly better for this task
 
 ---
 
@@ -233,10 +306,10 @@ Based on the results, we expect:
 
 1. **Complete All Experiments:**
    - Main model: GeoCNN-Base ✓
-   - Side A: Edge augmentation
+   - Side A: Edge augmentation ✓ (Sobel & Canny both completed)
    - Side B: BoVW baseline
    - Side C: Segmentation
-   - Side D: Line features
+   - Side D: Line features (in progress)
    - Optional: Transfer learning baseline
 
 2. **Create Comparison Table:**
@@ -264,23 +337,31 @@ Based on the results, we expect:
    - 43% Top-1 accuracy on 98-class problem is promising
    - Model is learning geographic patterns
 
-2. **Top-5 Accuracy is Strong:**
-   - 74% Top-5 suggests model often identifies correct region
+2. **Edge Channels Provide Significant Boost:**
+   - **+4.5-4.7 percentage points improvement** with edge augmentation
+   - Confirms that classical CV techniques (derivatives, edges) complement deep learning
+   - Both Sobel and Canny work well, with Canny slightly better
+   - Edge information helps identify country-specific road markings and architecture
+
+3. **Top-5 Accuracy is Strong:**
+   - Base: 74% Top-5, Edge models: 77-78% Top-5
+   - Model often identifies correct region/continent
    - Useful for GeoGuessr where narrowing to 5 countries is valuable
 
-3. **Class Imbalance Remains Challenging:**
-   - Low Macro F1 (0.12) indicates poor performance on rare countries
+4. **Class Imbalance Remains Challenging:**
+   - Low Macro F1 (0.11-0.12) indicates poor performance on rare countries
+   - Edge channels help common classes more than rare ones
    - Need better strategies for underrepresented classes
 
-4. **Training is Stable:**
-   - No overfitting observed
+5. **Training is Stable:**
+   - No overfitting observed in any model
    - Consistent improvement throughout training
-   - Model capacity seems appropriate
+   - Edge models train faster (2 hours vs 4.28 hours)
 
-5. **Room for Improvement:**
-   - Transfer learning should significantly boost performance
-   - Side experiments (edges, lines, segmentation) may help
-   - Longer training and better data balance could improve results
+6. **Classical CV + Deep Learning Works:**
+   - Edge augmentation demonstrates that feature engineering still has value
+   - Multi-modal fusion (visual + edge features) improves performance
+   - Perfect example for computer vision course paper
 
 ---
 
@@ -292,11 +373,10 @@ Based on the results, we expect:
 python run_all_experiments.py --data_dir ./compressed_dataset --skip_cnn
 ```
 
-**Priority 2: Edge-Augmented Model**
-```bash
-# Test if edge channels help
-python train.py --model edge --edge_type sobel --data_dir ./compressed_dataset --epochs 20
-```
+**Priority 2: Edge-Augmented Model** ✓ **COMPLETED**
+- Sobel: 47.61% Top-1 (+4.55 pp improvement)
+- Canny: 47.74% Top-1 (+4.68 pp improvement)
+- Both experiments successful!
 
 **Priority 3: Longer Training**
 ```bash
@@ -332,6 +412,21 @@ All outputs saved to: `./outputs/geocnn_base_20251203_232533/`
 
 ---
 
+---
+
+## 8. Experiment Summary Table
+
+| Experiment | Top-1 Acc | Top-5 Acc | Macro F1 | Params | Training Time | Status |
+|------------|-----------|-----------|----------|--------|---------------|--------|
+| GeoCNN-Base | 43.06% | 74.09% | 0.1218 | 674K | 4.28 hrs | ✓ Complete |
+| GeoCNN-Edge (Sobel) | 47.61% | 78.04% | 0.1100 | 675K | 2.00 hrs | ✓ Complete |
+| GeoCNN-Edge (Canny) | 47.74% | 77.67% | 0.1129 | 674K | 1.96 hrs | ✓ Complete |
+| GeoCNN-Lines | - | - | - | 686K | - | ⏳ Pending |
+
+**Key Insight:** Edge augmentation provides **+4.5-4.7 percentage point improvement**, confirming that classical CV techniques (derivatives, edges) significantly help deep learning models for geolocation tasks.
+
+---
+
 **Last Updated:** December 4, 2025  
-**Next Review:** After completing baseline experiments
+**Next Review:** After completing lines experiment
 

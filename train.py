@@ -686,11 +686,15 @@ def train_lines_model(args):
             self.line_extractor = LineFeatureAugmentation()
         
         def __getitem__(self, idx):
-            # Get image and label
-            image, label = super().__getitem__(idx)
+            # Get image and label (handle return_path properly)
+            result = super().__getitem__(idx)
+            if self.return_path:
+                image, label, img_path = result
+            else:
+                image, label = result
+                img_path = self.image_paths[idx]
             
             # Extract line features from original image
-            img_path = self.image_paths[idx]
             import cv2
             img = cv2.imread(img_path)
             if img is not None:
