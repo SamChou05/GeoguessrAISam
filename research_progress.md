@@ -163,6 +163,96 @@ The cosine annealing schedule worked as expected:
 
 ---
 
+## 2.6 Side Experiment D: Line Features Results
+
+### 2.6.1 Experiment Overview
+
+**Side Experiment D** tested whether line orientation histograms extracted via Hough Transform improve country classification by capturing geometric patterns like lane geometry, power lines, and architectural structures.
+
+**Computer Vision Techniques:**
+- Canny edge detection
+- Probabilistic Hough Transform for line detection
+- Line orientation histogram (16 bins) + statistics
+- Course topics: Line Detection, Hough Transform
+
+**Architecture:**
+- CNN backbone extracts 256-d visual features
+- Line features (20-d: 16 orientation bins + 4 statistics) → MLP → 64-d
+- Concatenated: 256 + 64 = 320-d → Final classifier
+- Total parameters: 685,890 (~686K)
+
+### 2.6.2 Results Comparison
+
+| Model | Top-1 Acc | Top-5 Acc | Macro F1 | Improvement vs Base |
+|-------|-----------|-----------|----------|---------------------|
+| **GeoCNN-Base** | 43.06% | 74.09% | 0.1218 | Baseline |
+| **GeoCNN-Lines** | **43.43%** | **73.57%** | **0.0840** | **+0.37 pp** (minimal) |
+
+### 2.6.3 Key Findings
+
+**⚠️ Minimal Improvement:**
+- **Top-1 Accuracy:** Only +0.37 percentage points (43.06% → 43.43%)
+- **Top-5 Accuracy:** Actually slightly worse (74.09% → 73.57%, -0.52 pp)
+- **Macro F1:** Significantly worse (0.1218 → 0.0840, -0.0378)
+- **Conclusion:** Line features did not provide meaningful improvement
+
+**⚠️ Training Efficiency Issues:**
+- **Training Time:** 14.20 hours (vs 4.28 hours for base) - **3.3× slower**
+- **Time per Epoch:** 42.3 minutes (vs 12.8 minutes for base)
+- **Bottleneck:** On-the-fly line feature extraction (Canny + Hough Transform) is computationally expensive
+
+### 2.6.4 Why Line Features Didn't Help
+
+**Possible Reasons:**
+
+1. **Feature Redundancy:**
+   - CNN already learns edge and line-like features through its filters
+   - Explicit line features may not add new discriminative information
+   - The 256-d CNN features may already capture geometric patterns
+
+2. **Noise in Line Detection:**
+   - Hough Transform may detect spurious lines or miss important ones
+   - Many street scenes may have few/no detectable lines
+   - Line features may be too sparse or noisy to be useful
+
+3. **Fusion Strategy:**
+   - Simple concatenation may not be optimal
+   - Line features (64-d) may be overwhelmed by visual features (256-d)
+   - May need attention mechanism or better fusion strategy
+
+4. **Dataset Characteristics:**
+   - Street scenes vary widely in line content
+   - Some countries may not have distinctive line patterns
+   - Line geometry may not be as country-specific as expected
+
+### 2.6.5 Training Dynamics
+
+- **Best epoch:** 19 (very late in training)
+- **Final losses:** Train 1.7833, Val 1.7790 (similar to base)
+- **Convergence:** Slower than base model, took until epoch 19 to peak
+- **Validation accuracy progression:** Started at 25.3%, peaked at 43.43% at epoch 19
+
+### 2.6.6 Comparison with Edge Experiment
+
+| Aspect | Edge Channels | Line Features |
+|--------|---------------|---------------|
+| **Top-1 Improvement** | +4.5-4.7 pp ✅ | +0.37 pp ⚠️ |
+| **Training Time** | 2.0 hrs (faster) ✅ | 14.2 hrs (3.3× slower) ❌ |
+| **Macro F1** | Slightly lower | Much lower ❌ |
+| **Practical Value** | High ✅ | Low ⚠️ |
+
+**Key Insight:** Not all classical CV techniques are equally effective. Edge channels (derivatives) provide significant benefit, while line features (Hough Transform) do not justify the computational cost.
+
+### 2.6.7 Future Improvements for Line Features
+
+If pursuing line features further:
+1. **Pre-compute line features** to avoid on-the-fly extraction
+2. **Better fusion strategy** (attention, weighted combination)
+3. **Filter line features** to remove noise/spurious detections
+4. **Focus on specific scenarios** where lines are more discriminative (urban vs rural)
+
+---
+
 ## 3. Discussion
 
 ### 3.1 What Worked Well
@@ -199,6 +289,12 @@ The cosine annealing schedule worked as expected:
    - While better than random (1%), still leaves room for improvement
    - For 98 classes, this suggests the model is learning some patterns but not all
 
+4. **Not All Classical CV Techniques Help Equally:**
+   - Edge channels: Significant improvement (+4.5-4.7 pp) ✅
+   - Line features: Minimal improvement (+0.37 pp) with 3.3× slower training ❌
+   - Important lesson: Feature engineering must be chosen carefully
+   - Negative results are valuable for research - shows what doesn't work
+
 4. **Training Time:**
    - ~13 minutes per epoch (766 seconds average)
    - Some epochs took much longer (epochs 6-7: 1-3 hours) - likely system issues
@@ -211,6 +307,22 @@ Based on the results, we expect:
 - **Continent-Level Patterns:** Model may perform better at continent-level than country-level
 - **Underrepresented Classes:** Countries with <100 images likely have very low recall
 - **Visual Similarity:** Countries with similar architecture/landscape may be confused
+
+### 3.4 Classical CV Techniques: Success and Failure
+
+**What Worked: Edge Channels (Derivatives)**
+- **Sobel/Canny edges:** +4.5-4.7 pp improvement
+- **Why:** Explicit gradient information helps identify road markings, architecture, infrastructure
+- **Efficient:** Only 2× slower training, significant accuracy gain
+- **Recommendation:** Use edge augmentation for geolocation tasks
+
+**What Didn't Work: Line Features (Hough Transform)**
+- **Line orientation histograms:** Only +0.37 pp improvement
+- **Why:** CNN already learns line-like features; explicit line features add noise/redundancy
+- **Inefficient:** 3.3× slower training for minimal gain
+- **Recommendation:** Skip line features for this task; focus on edge channels instead
+
+**Key Research Insight:** This demonstrates the importance of empirical evaluation. Not all classical CV techniques translate well to deep learning pipelines. Edge information (derivatives) is complementary to CNNs, while line features (Hough Transform) are largely redundant.
 
 ---
 
@@ -306,10 +418,10 @@ Based on the results, we expect:
 
 1. **Complete All Experiments:**
    - Main model: GeoCNN-Base ✓
-   - Side A: Edge augmentation ✓ (Sobel & Canny both completed)
+   - Side A: Edge augmentation ✓ (Sobel & Canny both completed - significant improvement)
    - Side B: BoVW baseline
    - Side C: Segmentation
-   - Side D: Line features (in progress)
+   - Side D: Line features ✓ (completed - minimal improvement, not recommended)
    - Optional: Transfer learning baseline
 
 2. **Create Comparison Table:**
@@ -358,10 +470,12 @@ Based on the results, we expect:
    - Consistent improvement throughout training
    - Edge models train faster (2 hours vs 4.28 hours)
 
-6. **Classical CV + Deep Learning Works:**
-   - Edge augmentation demonstrates that feature engineering still has value
-   - Multi-modal fusion (visual + edge features) improves performance
-   - Perfect example for computer vision course paper
+6. **Classical CV + Deep Learning: Mixed Results:**
+   - **Edge channels work well:** +4.5-4.7 pp improvement, confirms derivatives/edges help
+   - **Line features don't help:** Minimal improvement (+0.37 pp) with 3.3× slower training
+   - **Key lesson:** Not all classical CV techniques are equally effective
+   - Feature engineering has value, but must be chosen carefully
+   - Perfect example for computer vision course paper showing both success and failure cases
 
 ---
 
@@ -421,12 +535,15 @@ All outputs saved to: `./outputs/geocnn_base_20251203_232533/`
 | GeoCNN-Base | 43.06% | 74.09% | 0.1218 | 674K | 4.28 hrs | ✓ Complete |
 | GeoCNN-Edge (Sobel) | 47.61% | 78.04% | 0.1100 | 675K | 2.00 hrs | ✓ Complete |
 | GeoCNN-Edge (Canny) | 47.74% | 77.67% | 0.1129 | 674K | 1.96 hrs | ✓ Complete |
-| GeoCNN-Lines | - | - | - | 686K | - | ⏳ Pending |
+| GeoCNN-Lines | 43.43% | 73.57% | 0.0840 | 686K | 14.20 hrs | ✓ Complete |
 
-**Key Insight:** Edge augmentation provides **+4.5-4.7 percentage point improvement**, confirming that classical CV techniques (derivatives, edges) significantly help deep learning models for geolocation tasks.
+**Key Insights:**
+- **Edge augmentation works:** +4.5-4.7 percentage point improvement, confirming that derivatives/edges significantly help
+- **Line features don't help:** Only +0.37 pp improvement with 3.3× slower training - not worth the computational cost
+- **Not all classical CV techniques are equal:** Careful feature engineering selection is crucial
 
 ---
 
 **Last Updated:** December 4, 2025  
-**Next Review:** After completing lines experiment
+**Status:** Base model, Edge experiments, and Lines experiment all complete. Ready for baseline comparisons and final analysis.
 

@@ -1,0 +1,499 @@
+\documentclass{article}
+\usepackage{nips15submit_e,times}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\nipsfinalcopy % show authors instead of Anonymous
+
+\title{GeoGuessr AI: Computer Vision for Geographic Location Prediction}
+
+\author{
+Kevin Wang\thanks{Team: Kevin Wang, Alan Geng, Ethan Tieu, Sam Chou.} \\
+University of Washington \\
+\texttt{kvnwxng@uw.edu}
+\And
+Alan Geng \\
+University of Washington \\
+\texttt{gengalan@uw.edu}
+\And
+Ethan Tieu \\
+University of Washington \\
+\texttt{email@domain.edu}
+\And
+Sam Chou \\
+University of Washington \\
+\texttt{email@domain.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Geolocating an image is a difficult computer vision task, as it requires identifying subtle environmental, architectural, and cultural cues from a single image. In this project, we aim to build a model that can predict the country in which a Google Street View image was captured, focusing specifically on the GeoGuessr ``No Moving, Panning, Zooming'' (NMPZ) setting. Under this restriction, the model must rely entirely on static visual cues such as vegetation, road markings, signage, building styles, terrain, and other geographic indicators. To address this challenge, we explore two distinct approaches: a traditional convolutional neural network and a fine-tuned GPT-4o vision-language model. Our fine-tuned GPT-4o achieves 82.07\% top-1 accuracy on a held-out test set of 184 images spanning 92 countries, demonstrating that modern vision models can learn strong geographic representations with relatively modest fine-tuning data. We compare both approaches and analyze their strengths, limitations, and failure modes.
+\end{abstract}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introduction}
+
+Determining the geographic location of an image is a complex task that humans often figure out through a form of intuitive reasoning. These reasons include but are not limited to recognizing plant species, finding language on street signs, looking at plant health to determine weather timing, identifying different types of architecture, or using road markings and vehicles as clues. GeoGuessr, a popular online geography game, packages this challenge into a playful format, and its NMPZ (``No Moving, Panning, Zooming'') mode turns this playful format into a problem simply explained as this: infer the location using only a single and non-movable image.
+
+This project aims to build a machine learning model that can perform this task directly. In particular, we focus on predicting the country in which a single Google Street View image was captured. Starting with country level classification is a practical choice because it offers a good balance between difficulty, data availability, and clear evaluation metrics. In the future, this framework could be extended to more detailed tasks, such as region level classification or even direct latitude and longitude prediction.
+
+This problem is challenging for several reasons. Many parts of the world share very similar visual appearances---temperate forests in Europe and North America can look almost identical, just as arid landscapes in Africa and Australia often resemble each other. At the same time, many countries contain very wide internal variation in climate, architecture, and infrastructure, making it difficult for a model to learn a single, unified representation of a place. Visual cues such as signage, languages, road markings, guardrails, vegetation, and building styles can be extremely helpful, but they vary greatly in reliability, scale, and visibility. Sometimes the most important clue in an image is really subtle or surprisingly small.
+
+Despite these difficulties, prior research has shown that deep learning models are capable of learning meaningful geographic patterns directly from raw pixel data. Motivated by this work, our project explores two distinct approaches---a traditional CNN classifier and a fine-tuned large vision-language model---to evaluate their performance on global image-based location prediction. This report discusses the motivation behind the project, reviews relevant literature, presents our methodology and results, and highlights promising directions for future improvement.
+
+\textbf{Contributions.} Kevin Wang developed the GPT-4o fine-tuning pipeline, including data preprocessing, S3 hosting, and evaluation scripts. Sam Chou implemented and trained the CNN baseline. Alan Geng and Ethan Tieu contributed to dataset curation, test set construction, and analysis.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Related Work}
+
+\subsection{Image-Based Geolocation}
+
+The problem of predicting the geographic location of an image has been studied for more than a decade, and early work focused on matching an input image to large datasets of geotagged photos. One of the first major systems was IM2GPS, which used handcrafted visual features and nearest-neighbor search to guess a location based on similar images in its dataset [1]. While this approach showed that coarse geolocation was possible, it struggled in areas without strong visual landmarks.
+
+A major shift came with the introduction of deep learning. PlaNet treated geolocation as a large image-classification problem, dividing the world into many small regions and training a convolutional neural network to predict which region an image belonged to [2]. This approach dramatically improved performance because CNNs can learn subtle visual cues—such as vegetation, architecture, and road markings—directly from pixel data. After PlaNet, several extensions were proposed, including better ways of dividing the world into regions [3] and hierarchical models that classify broad areas first and then refine the prediction [4].
+
+Other research combined CNN feature extraction with retrieval-style methods, where a model extracts features from the input image and then compares them to features from a large database of labeled images. One example is work by Vo et al., which used deep features followed by a nearest-neighbor search to predict coordinates more continuously rather than as fixed classes [5]. These hybrid approaches helped improve flexibility and accuracy, especially when training data is limited.
+
+More recently, newer model types such as transformer-based architectures and large “foundation models” have been explored in geolocation research. Although these models go beyond what we covered in class, their results are worth noting. Some transformer-based models use global context and additional cues to improve prediction accuracy [6], while other approaches aim to place images and GPS coordinates into a shared feature space to allow smoother, more flexible predictions [7].
+
+Foundation models such as CLIP have also shown surprising ability in geolocation tasks even though they are not trained specifically for it [8]. Models like DINOv2 learn strong visual features through self-supervision and can be adapted to geolocation with relatively little fine-tuning [9]. A recent system called StreetCLIP applied these ideas to street-level images and achieved state-of-the-art results on country and city prediction using CLIP’s zero-shot capabilities [10]. These advances suggest that large, general-purpose models naturally learn a lot of geographic information simply from being trained on diverse visual datasets.
+
+\subsection{Street-Level Geolocation and Cues}
+
+Street View imagery is particularly useful for geolocation because it contains many small details that vary from country to country. Things like road paint, traffic signs, guardrails, utility poles, vegetation, housing styles, and even the types of vehicles on the road can all serve as clues. Prior research has shown that CNNs trained on large street-level datasets can learn to recognize these features. For example, a study by Gebru et al.\ used millions of Street View images to detect cars and then used those detections to estimate neighborhood demographics across the United States [11]. This demonstrated how much information about a location is embedded in everyday imagery.
+
+Street View data has also been used to study city structure, land use, and urban density, which reinforces the idea that panoramic images contain distinctive, region-specific patterns [12]. These studies also highlight the importance of controlling for environmental factors like season, weather, and lighting, which can introduce noise or biases. For our project, these insights helped motivate focusing on more stable features such as road markings, vegetation types, and architectural styles.
+
+The GeoGuessr community has also contributed practical knowledge to this space. Experienced players often use subtle details—such as the design of roadside bollards, the shape of utility poles, soil color, or typical road markings—to guess a country from a single image. These examples illustrate that fine-grained visual cues are extremely informative and align well with the kinds of patterns CNNs are good at learning.
+
+\subsection{Community Knowledge and Human Heuristics}
+
+The game GeoGuessr, especially in its “No Moving, Panning, Zooming” (NMPZ) mode, has become a popular and informal benchmark for single-image geolocation. Over time, expert players have identified a wide range of visual clues that help narrow down a location quickly. These clues include traffic sign shapes, guardrail materials, license plate formats, architectural styles, vegetation density, and even artifacts introduced by Google’s image-processing pipeline that differ between countries.
+
+Community-created AI models used in competitive GeoGuessr scenes often rely on CNNs or simple transformer models trained on large collections of Street View images [13]. Their strong performance suggests that neural networks learn many of the same patterns that human players rely on—sometimes even noticing cues too subtle for humans to articulate. This alignment between human heuristics and machine-learned features supports our own approach of training a CNN for country-level geolocation: both humans and models can use the same kinds of visual details to make effective predictions.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Technical Description / Algorithm}
+
+\subsection{Data Collection and Preprocessing}
+
+Our training data originated from a publicly available dataset of approximately 50,000 Google Street View images spanning 92 countries. Each image was organized in a directory structure where the parent folder name indicated the ground truth country label.
+
+\subsubsection{Privacy Filtering}
+
+OpenAI's fine-tuning API enforces strict content policies that reject images containing identifiable faces or human figures. To address this, we implemented a multi-stage filtering pipeline using OpenCV's classical computer vision detectors:
+
+\begin{enumerate}
+    \item \textbf{Haar Cascade Face Detection} --- We applied the pre-trained frontal face classifier with parameters \texttt{scaleFactor=1.1}, \texttt{minNeighbors=5}, and \texttt{minSize=(30,30)} to detect frontal faces.
+    
+    \item \textbf{Haar Cascade Body Detection} --- We additionally employed full-body and upper-body classifiers to identify human figures that might pass face detection.
+    
+    \item \textbf{HOG Person Detection} --- For images passing Haar cascade filters, we optionally applied OpenCV's Histogram of Oriented Gradients (HOG) people detector with a pre-trained SVM classifier.
+\end{enumerate}
+
+Images flagged by any detector were removed from the training set. This filtering step was essential for successful fine-tuning, as our initial attempts without filtering resulted in repeated API rejections.
+
+\subsubsection{Dataset Balancing}
+
+To ensure fair representation across countries and manage fine-tuning costs, we implemented a balanced sampling strategy. We computed an initial per-country cap of $\lfloor\text{target\_total} / \text{num\_countries}\rfloor$, then iteratively redistributed quota from countries with fewer available images to those with more. This approach yielded approximately 4,400 training examples with roughly equal representation per country.
+
+\subsubsection{Data Format}
+
+We converted the filtered dataset to OpenAI's JSONL fine-tuning format for vision models. Each training example consisted of a system prompt instructing the model to classify countries, a user message containing the classification query and an image URL (hosted on a public AWS S3 bucket), and an assistant response containing only the country name. The dataset was split 80/20 into training and validation sets, resulting in approximately 3,520 training examples and 880 validation examples.
+
+\subsection{Model Architectures}
+
+We evaluated two fundamentally different approaches to the country classification task: a traditional convolutional neural network and a fine-tuned large vision-language model.
+
+\subsubsection{CNN Approach}
+
+We implemented a lightweight convolutional neural network called \textbf{GeoCNN-Base} designed specifically for country-level geolocation. Unlike transfer learning approaches, we trained from scratch to demonstrate that simple CNNs can learn geographic patterns directly from pixel data, while also exploring how classical computer vision techniques can enhance deep learning models.
+
+\textbf{Base Architecture (GeoCNN-Base):}
+\begin{itemize}
+    \item \textbf{Input:} 224$\times$224$\times$3 RGB images
+    \item \textbf{Block 1:} Conv3$\times$3 (3$\rightarrow$32) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ Conv3$\times$3 (32$\rightarrow$32) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ MaxPool2$\times$2
+    \item \textbf{Block 2:} Conv3$\times$3 (32$\rightarrow$64) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ Conv3$\times$3 (64$\rightarrow$64) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ MaxPool2$\times$2
+    \item \textbf{Block 3:} Conv3$\times$3 (64$\rightarrow$128) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ Conv3$\times$3 (128$\rightarrow$128) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ MaxPool2$\times$2
+    \item \textbf{Block 4:} Conv3$\times$3 (128$\rightarrow$256) $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ Conv1$\times$1 (256$\rightarrow$256) $\rightarrow$ BatchNorm $\rightarrow$ ReLU
+    \item \textbf{Head:} Global Average Pooling $\rightarrow$ Dropout(0.3) $\rightarrow$ Fully Connected (256$\rightarrow$98)
+    \item \textbf{Total Parameters:} 674,114 (~674K)
+    \item \textbf{Output:} 98-way softmax over countries
+\end{itemize}
+
+\textbf{Training Configuration:}
+\begin{itemize}
+    \item \textbf{Optimizer:} AdamW with learning rate $3 \times 10^{-4}$ and weight decay $1 \times 10^{-4}$
+    \item \textbf{Scheduler:} Cosine annealing over 20 epochs
+    \item \textbf{Loss:} Cross-entropy with label smoothing ($\epsilon = 0.1$) and per-class weighting ($w_c \propto 1/\log(1+n_c)$)
+    \item \textbf{Batch size:} 64
+    \item \textbf{Data augmentation:} RandomResizedCrop (scale 0.7--1.0), ColorJitter (brightness/contrast/saturation 0.2), GaussianBlur (p=0.2)
+    \item \textbf{Important design choice:} No horizontal flips (preserves driving side information critical for geolocation)
+\end{itemize}
+
+\textbf{Side Experiments with Classical CV Techniques:}
+To evaluate whether classical computer vision techniques can enhance deep learning models, we implemented two augmentations:
+
+\begin{itemize}
+    \item \textbf{GeoCNN-Edge (Sobel):} Adds Sobel gradient orientation channels (cos $\theta$, sin $\theta$) computed from image gradients, resulting in 5-channel input (RGB + 2 edge channels). This explicitly encodes derivative information that may help identify road markings and architectural edges.
+    
+    \item \textbf{GeoCNN-Edge (Canny):} Adds a Canny edge detection map as an additional channel, resulting in 4-channel input (RGB + edge map). This provides a binary edge representation that may be more robust to noise.
+    
+    \item \textbf{GeoCNN-Lines:} Extracts line orientation histograms using Canny edge detection followed by Probabilistic Hough Transform. The 20-dimensional feature vector (16 orientation bins + 4 statistics) is processed through an MLP and fused with CNN features before classification. This tests whether explicit line geometry helps identify country-specific lane patterns and infrastructure.
+\end{itemize}
+
+% Placeholder for CNN architecture diagram
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.8\textwidth}{\centering\vspace{2cm}\textbf{[PLACEHOLDER: CNN Architecture Diagram]}\vspace{2cm}}}
+\caption{Architecture of our CNN-based country classifier.}
+\label{fig:cnn-arch}
+\end{figure}
+
+\subsubsection{Fine-Tuned GPT-4o Approach}
+
+We fine-tuned GPT-4o (\texttt{gpt-4o-2024-08-06}) using OpenAI's supervised fine-tuning API. This approach leverages the extensive visual and geographic knowledge already embedded in the foundation model, requiring only task-specific adaptation.
+
+\begin{table}[h]
+\centering
+\caption{GPT-4o Fine-tuning Hyperparameters}
+\label{tab:gpt4o-params}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Base Model & gpt-4o-2024-08-06 \\
+Epochs & 3 \\
+Batch Size & 2 \\
+Learning Rate Multiplier & 2 \\
+Total Training Steps & 1,791 \\
+Trained Tokens & 4,491,291 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\subsubsection{Training Metrics}
+
+During fine-tuning of GPT-4o, we tracked training loss, validation loss, and token-level accuracy through OpenAI's dashboard. For the CNN, we monitored cross-entropy loss and top-1/top-5 accuracy on a held-out validation set.
+
+\subsubsection{Test Set Construction}
+
+To evaluate generalization beyond the training distribution, we constructed a completely independent test set by manually playing GeoGuessr in NMPZ mode and capturing screenshots. This approach ensured that test images came from different Street View captures than the training data, with potentially different lighting conditions, camera angles, and coverage dates. We collected 184 test images spanning all 92 countries in our classification space (2 images per country).
+
+\subsubsection{Evaluation Protocol}
+
+For each test image, we queried both models using their respective inference procedures and recorded the predicted country. We report top-1 accuracy overall and per-country, along with confusion analysis for commonly misclassified pairs.
+
+\subsection{Results}
+
+\subsubsection{GPT-4o Fine-Tuned Model}
+
+The fine-tuned GPT-4o model achieved \textbf{82.07\% top-1 accuracy} (151/184 correct) on our held-out test set. This represents strong performance on a 92-way classification task where random guessing would yield approximately 1.1\% accuracy.
+
+% Placeholder for GPT-4o training curves
+\begin{figure}[h]
+\centering
+\fbox{\parbox{\textwidth}{\centering
+    \includegraphics[width=\textwidth]{gpt.png}\\
+    \small Left: Training and validation loss over 1,791 steps.\\
+    Right: Validation accuracy progression.
+}}
+\caption{Training dynamics for fine-tuned GPT-4o. Training loss decreased from $\sim$1.4 to 0.534, while validation accuracy exceeded 95\% by epoch 2.}
+\label{fig:gpt4o-training}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{GPT-4o Fine-Tuning Results}
+\label{tab:gpt4o-results}
+\begin{tabular}{ll}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Final Training Loss & 0.534 \\
+Final Validation Loss & 0.213 \\
+Full Validation Loss & 0.549 \\
+Test Accuracy (Top-1) & 82.07\% (151/184) \\
+Countries with 100\% Accuracy & 64 / 92 \\
+Countries with 0\% Accuracy & 6 / 92 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{CNN Model}
+
+We trained four CNN variants to evaluate the base architecture and classical CV augmentations. All models were trained on 34,942 training images and evaluated on 7,488 validation images from 98 countries.
+
+\textbf{GeoCNN-Base Results:}
+The base model achieved \textbf{43.06\% top-1 accuracy} and \textbf{74.09\% top-5 accuracy} on the validation set. Training was stable with consistent improvement over 20 epochs, reaching best performance at epoch 17.
+
+\begin{table}[h]
+\centering
+\caption{GeoCNN-Base Training Results}
+\label{tab:cnn-base-results}
+\begin{tabular}{ll}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Best Validation Top-1 Accuracy & 43.06\% \\
+Best Validation Top-5 Accuracy & 74.09\% \\
+Best Validation Macro F1 & 0.1218 \\
+Final Training Loss & 2.0342 \\
+Final Validation Loss & 1.7725 \\
+Best Epoch & 17 \\
+Total Training Time & 4.28 hours \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Edge-Augmented Models:}
+Both edge augmentation variants showed significant improvements over the base model. The Canny edge variant achieved the best performance with \textbf{47.74\% top-1 accuracy}, representing a +4.68 percentage point improvement.
+
+\begin{table}[h]
+\centering
+\caption{Edge-Augmented CNN Results}
+\label{tab:cnn-edge-results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Top-1 Acc.} & \textbf{Top-5 Acc.} & \textbf{Macro F1} \\
+\midrule
+GeoCNN-Base & 43.06\% & 74.09\% & 0.1218 \\
+GeoCNN-Edge (Sobel) & 47.61\% & 78.04\% & 0.1100 \\
+GeoCNN-Edge (Canny) & \textbf{47.74\%} & \textbf{77.67\%} & \textbf{0.1129} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Line Features Model:}
+The line orientation histogram fusion showed minimal improvement, achieving only 43.43\% top-1 accuracy (+0.37 percentage points) while requiring 3.3$\times$ longer training time (14.20 hours vs 4.28 hours). This suggests that explicit line features add redundancy rather than new discriminative information.
+
+\begin{table}[h]
+\centering
+\caption{Complete CNN Model Comparison}
+\label{tab:cnn-all-results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Top-1} & \textbf{Top-5} & \textbf{Macro F1} & \textbf{Training Time} \\
+\midrule
+GeoCNN-Base & 43.06\% & 74.09\% & 0.1218 & 4.28 hrs \\
+GeoCNN-Edge (Sobel) & 47.61\% & 78.04\% & 0.1100 & 2.00 hrs \\
+GeoCNN-Edge (Canny) & \textbf{47.74\%} & 77.67\% & 0.1129 & 1.96 hrs \\
+GeoCNN-Lines & 43.43\% & 73.57\% & 0.0840 & 14.20 hrs \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% Placeholder for CNN training curves
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.85\textwidth}{\centering\vspace{2.5cm}\textbf{[PLACEHOLDER: CNN Training Loss and Accuracy Curves]}\\\vspace{0.3cm}\small Training and validation metrics over [N] epochs.\vspace{2cm}}}
+\caption{Training dynamics for CNN classifier.}
+\label{fig:cnn-training}
+\end{figure}
+
+\subsubsection{Model Comparison}
+
+% Placeholder for comparison bar chart
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.85\textwidth}{\centering\vspace{2.5cm}\textbf{[PLACEHOLDER: Model Comparison Bar Chart]}\\\vspace{0.3cm}\small Side-by-side comparison of GPT-4o vs CNN accuracy.\vspace{2cm}}}
+\caption{Comparison of test accuracy between fine-tuned GPT-4o and CNN approaches.}
+\label{fig:model-comparison}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{Model Comparison Summary}
+\label{tab:comparison}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Val Accuracy} & \textbf{Training Time} & \textbf{Parameters} \\
+\midrule
+Fine-tuned GPT-4o & 82.07\% (test) & $\sim$1.5 hours & Large foundation model \\
+GeoCNN-Edge (Canny) & 47.74\% & 1.96 hours & 674K \\
+GeoCNN-Edge (Sobel) & 47.61\% & 2.00 hours & 675K \\
+GeoCNN-Base & 43.06\% & 4.28 hours & 674K \\
+GeoCNN-Lines & 43.43\% & 14.20 hours & 686K \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-Country Analysis}
+
+The fine-tuned GPT-4o model achieved perfect accuracy (100\%) on 64 of 92 countries, including visually distinctive nations such as Japan, Iceland, Bhutan, and Mongolia. Countries with 50\% accuracy (1/2 correct) included several European nations with similar visual characteristics (Austria, Germany, Greece, Sweden) and smaller nations (Albania, Eswatini, San Marino).
+
+Six countries yielded 0\% accuracy: Jordan, Liechtenstein, Oman, Panama, S\~{a}o Tom\'{e} and Pr\'{i}ncipe, and Serbia. These failures likely stem from limited training data for small nations, visual similarity to neighboring countries, and the inherent difficulty of distinguishing certain regions from only 2 test samples.
+
+% Placeholder for per-country accuracy heatmap
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{3.5cm}\textbf{[PLACEHOLDER: Per-Country Accuracy Visualization]}\\\vspace{0.3cm}\small World map heatmap or grouped bar chart showing accuracy by country/region.\vspace{3cm}}}
+\caption{Per-country classification accuracy for the fine-tuned GPT-4o model. Green indicates 100\% accuracy, yellow indicates 50\%, and red indicates 0\%.}
+\label{fig:per-country}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{Selected Per-Country Results (GPT-4o)}
+\label{tab:per-country}
+\begin{tabular}{lcc|lcc}
+\toprule
+\textbf{Country} & \textbf{Correct} & \textbf{Acc.} & \textbf{Country} & \textbf{Correct} & \textbf{Acc.} \\
+\midrule
+Japan & 2/2 & 100\% & Germany & 1/2 & 50\% \\
+Iceland & 2/2 & 100\% & Sweden & 1/2 & 50\% \\
+Bhutan & 2/2 & 100\% & Mexico & 1/2 & 50\% \\
+United States & 2/2 & 100\% & Jordan & 0/2 & 0\% \\
+Brazil & 2/2 & 100\% & Serbia & 0/2 & 0\% \\
+Australia & 2/2 & 100\% & Liechtenstein & 0/2 & 0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Confusion Analysis}
+
+Qualitative analysis of misclassifications revealed interpretable error patterns:
+
+\begin{itemize}
+    \item \textbf{European confusion:} Countries like Slovenia, Austria, and Switzerland were occasionally confused with each other due to similar Alpine landscapes and Germanic architectural styles.
+    \item \textbf{Latin American confusion:} Mexico was misclassified as Argentina; both share Spanish-language signage and similar vegetation in some regions.
+    \item \textbf{African challenges:} South Africa was confused with Madagascar, possibly due to similar vegetation patterns.
+    \item \textbf{Small nation difficulty:} Nations with limited Street View coverage (S\~{a}o Tom\'{e} and Pr\'{i}ncipe, Liechtenstein) proved particularly challenging.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Discussion}
+
+\subsection{Comparison of Approaches}
+
+The fine-tuned GPT-4o model and CNN approach represent fundamentally different paradigms for visual geolocation. GPT-4o brings extensive pre-trained knowledge about world geography, languages, and visual patterns, requiring only task-specific fine-tuning. The CNN approach learns geographic features from scratch, potentially offering more interpretable representations but requiring more training data and compute.
+
+\textbf{Key differences observed:}
+\begin{itemize}
+    \item \textbf{Accuracy:} GPT-4o achieved 82.07\% on test set; best CNN (GeoCNN-Edge Canny) achieved 47.74\% on validation set
+    \item \textbf{Training efficiency:} GPT-4o fine-tuning completed in $\sim$1.5 hours; CNN training took 1.96--14.20 hours depending on variant
+    \item \textbf{Data efficiency:} GPT-4o achieved strong results with $\sim$3,500 examples; CNN used $\sim$35,000 training images
+    \item \textbf{Cost:} GPT-4o fine-tuning cost $\sim$\$100; CNN training required local GPU compute (Apple Metal MPS)
+    \item \textbf{Interpretability:} CNN features can be visualized with Grad-CAM; GPT-4o operates as a black box
+    \item \textbf{Model size:} GPT-4o is a large foundation model; CNN is lightweight (674K parameters)
+\end{itemize}
+
+\subsection{Classical CV Techniques: What Worked and What Didn't}
+
+Our side experiments evaluating classical computer vision techniques revealed important insights about feature engineering in modern deep learning pipelines.
+
+\textbf{Edge Channels (Derivatives) - Success:}
+Adding Sobel or Canny edge channels to the input provided a significant improvement of +4.5--4.7 percentage points in top-1 accuracy over the base model. This confirms that explicit gradient information helps identify country-specific features such as road markings, architectural edges, and infrastructure boundaries. The edge-augmented models also trained faster (1.96--2.00 hours vs 4.28 hours), likely due to better convergence from the additional signal. Both Sobel and Canny variants performed similarly, with Canny slightly outperforming Sobel (47.74\% vs 47.61\%). This demonstrates that classical derivative-based edge detection (a core topic in computer vision courses) can effectively complement deep learning models.
+
+\textbf{Line Features (Hough Transform) - Limited Success:}
+Fusing line orientation histograms extracted via Probabilistic Hough Transform showed minimal improvement (+0.37 percentage points) while requiring 3.3$\times$ longer training time (14.20 hours vs 4.28 hours). The line features likely added redundancy rather than new discriminative information, as CNNs already learn line-like features through their convolutional filters. This demonstrates that not all classical CV techniques translate effectively to deep learning pipelines---feature engineering must be chosen carefully.
+
+\textbf{Key Insight:} Feature engineering still has value in modern deep learning, but techniques must be selected based on empirical evaluation. Edge information (derivatives) complements CNN features, while explicit line detection (Hough Transform) is largely redundant. This finding is particularly relevant for computer vision education, showing both the value and limitations of classical techniques when combined with deep learning.
+
+\subsection{Strengths}
+
+\textbf{GPT-4o Approach:}
+The fine-tuned vision model demonstrates that large-scale pre-trained models can effectively learn geographic visual features with relatively modest fine-tuning data. The 82\% accuracy on completely out-of-distribution test images suggests the model learned generalizable cues rather than memorizing specific Street View locations. Strong performance on visually distinctive countries (Japan, Bhutan, Iceland) indicates the model successfully captures architectural styles, signage, vegetation patterns, and infrastructure elements.
+
+\textbf{CNN Approach:}
+The lightweight GeoCNN-Base model achieved 43\% top-1 accuracy on a 98-class problem, demonstrating that simple CNNs can learn meaningful geographic patterns from scratch. The 74\% top-5 accuracy suggests the model often identifies the correct region or continent, which is valuable for GeoGuessr applications. Edge augmentation provided a significant boost (+4.7 percentage points), confirming that classical computer vision techniques (derivatives, edge detection) can effectively enhance deep learning models. The model's small size (674K parameters) makes it practical for deployment scenarios where compute resources are limited.
+
+\subsection{Limitations}
+
+Several factors constrain our evaluation:
+
+\begin{enumerate}
+    \item \textbf{Small test set} --- With only 2 images per country, per-country accuracy estimates have high variance. A single misclassification drops accuracy from 100\% to 50\%.
+    
+    \item \textbf{Class imbalance in real-world distribution} --- Our balanced test set does not reflect the actual geographic distribution of Street View coverage. The CNN training set was highly imbalanced (United States: 12,014 images vs. many countries: $<$100 images), which contributed to low macro F1 scores (0.11--0.12).
+    
+    \item \textbf{API constraints} --- Privacy filtering forced removal of potentially informative images containing pedestrians, vehicles with visible passengers, or storefronts with people.
+    
+    \item \textbf{Cost limitations} --- Fine-tuning costs limited experimentation with larger training sets or hyperparameter search.
+    
+    \item \textbf{CNN performance gap} --- The CNN models achieved 43--48\% accuracy compared to GPT-4o's 82\%, indicating that from-scratch training requires significantly more data or better architectures to match foundation model performance.
+    
+    \item \textbf{Line features inefficiency} --- The Hough Transform-based line features required 3.3$\times$ longer training for minimal gain, demonstrating that not all classical CV techniques are worth the computational cost.
+\end{enumerate}
+
+\subsection{Comparison to Human Performance}
+
+Top GeoGuessr players achieve near-perfect accuracy in NMPZ mode through extensive memorization of meta-cues (camera generation, coverage patterns, Google car types) combined with deep geographic knowledge. Our model's 82\% accuracy, while strong for a 92-way classification task, likely falls short of expert human performance but may exceed casual player accuracy.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Future Work}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsubsection*{References}
+\small{
+\begin{thebibliography}{13}
+
+\bibitem{ref1}
+J.~Hays and A.~A.~Efros, ``IM2GPS: Estimating geographic information from a single image,'' 
+in \textit{Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2008, pp.~1--8.
+
+\bibitem{ref2}
+T.~Weyand, I.~Kostrikov, and J.~Philbin, ``PlaNet: Convolutional neural networks for geolocation classification,'' 
+in \textit{Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2016, pp.~2341--2350.
+
+\bibitem{ref3}
+H.~Seo, S.~Lee, and B.~Han, ``CPlaNet: Enhancing image geolocalization by combinatorial partitioning of maps,'' 
+in \textit{Proc. Eur. Conf. Comput. Vis. Workshops (ECCVW)}, 2018.
+
+\bibitem{ref4}
+A.~Müller-Budack, J.~J.~Ostermann, and R.~Ewerth, ``Improving image geolocation by hierarchical classification and scene recognition,'' 
+in \textit{Proc. Eur. Conf. Comput. Vis. Workshops (ECCVW)}, 2018.
+
+\bibitem{ref5}
+N.~Vo, N.~Samarasena, and J.~L.~Barron, ``Local feature matching and retrieval for image geolocalization,'' 
+\textit{arXiv:1703.08985}, 2017.
+
+\bibitem{ref6}
+A.~Kim, H.~R.~Huang, C.~J.~Taylor, and R.~S.~Feris, ``TransLocator: Transformer-based geolocalization using semantic scene cues,'' 
+in \textit{Proc. Eur. Conf. Comput. Vis. (ECCV)}, 2022.
+
+\bibitem{ref7}
+M.~Vivanco~Cepeda, R.~Pasricha, and D.~MacKenzie, ``GeoCLIP: CLIP-based coordinate alignment for image geolocalization,'' 
+in \textit{Advances in Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem{ref8}
+A.~Radford et al., ``Learning transferable visual models from natural language supervision,'' 
+\textit{arXiv:2103.00020}, 2021.
+
+\bibitem{ref9}
+L.~Oquab et al., ``DINOv2: Learning robust visual features without supervision,'' 
+in \textit{Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2023, pp.~4670--4680.
+
+\bibitem{ref10}
+K.~Haas, A.~Bhandari, J.~Wulff, and A.~Torralba, ``StreetCLIP: Zero-shot street-level image geolocalization with CLIP,'' 
+\textit{arXiv:2304.01954}, 2023.
+
+\bibitem{ref11}
+T.~Gebru et al., ``Using deep learning and Google Street View to estimate the demographic makeup of neighborhoods,'' 
+\textit{Proc. Natl. Acad. Sci. (PNAS)}, vol.~114, no.~50, pp.~13108--13113, 2017.
+
+\bibitem{ref12}
+O.~Tibebu and B.~Michael, ``Street-level image understanding for geospatial analysis,'' 
+\textit{Remote Sensing}, vol.~13, no.~4, p.~665, 2021.
+
+\bibitem{ref13}
+GeoGuessr competitive community heuristics and AI models (CNN/Transformer-based), 
+community resources 2019--2024.
+
+\end{thebibliography}
+}
+
+
+\end{document}
